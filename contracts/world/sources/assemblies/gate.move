@@ -70,6 +70,8 @@ const EGateTypeMismatch: vector<u8> = b"Gates have different TypeId values";
 const EExtensionConfigFrozen: vector<u8> = b"Extension configuration is frozen";
 #[error(code = 18)]
 const EExtensionNotConfigured: vector<u8> = b"Extension must be configured before freezing";
+#[error(code = 19)]
+const ENoExtensionToRevoke: vector<u8> = b"No extension authorization to revoke";
 
 // === Structs ===
 public struct GateConfig has key {
@@ -141,6 +143,13 @@ public struct ExtensionAuthorizedEvent has copy, drop {
     owner_cap_id: ID,
 }
 
+public struct ExtensionRevokedEvent has copy, drop {
+    assembly_id: ID,
+    assembly_key: TenantItemId,
+    revoked_extension: TypeName,
+    owner_cap_id: ID,
+}
+
 // === Public Functions ===
 public fun authorize_extension<Auth: drop>(gate: &mut Gate, owner_cap: &OwnerCap<Gate>) {
     let gate_id = object::id(gate);
@@ -165,6 +174,24 @@ public fun freeze_extension_config(gate: &mut Gate, owner_cap: &OwnerCap<Gate>) 
     assert!(option::is_some(&gate.extension), EExtensionNotConfigured);
     assert!(!extension_freeze::is_extension_frozen(&gate.id), EExtensionConfigFrozen);
     extension_freeze::freeze_extension_config(&mut gate.id, gate_id);
+}
+
+/// Clears extension authorization and restores default gate behaviour (e.g. `jump` without extension permits).
+/// Only the `OwnerCap` holder may call; **not allowed after** `freeze_extension_config`.
+public fun revoke_extension_authorization(gate: &mut Gate, owner_cap: &OwnerCap<Gate>) {
+    let gate_id = object::id(gate);
+    assert!(access::is_authorized(owner_cap, gate_id), EGateNotAuthorized);
+    assert!(!extension_freeze::is_extension_frozen(&gate.id), EExtensionConfigFrozen);
+    assert!(option::is_some(&gate.extension), ENoExtensionToRevoke);
+    let ext = gate.extension;
+    gate.extension = option::none();
+    let revoked_extension = option::destroy_some(ext);
+    event::emit(ExtensionRevokedEvent {
+        assembly_id: gate_id,
+        assembly_key: gate.key,
+        revoked_extension,
+        owner_cap_id: object::id(owner_cap),
+    });
 }
 
 public fun online(
@@ -312,6 +339,26 @@ public fun issue_jump_permit<Auth: drop>(
         expires_at_timestamp_ms,
     };
     transfer::transfer(jump_permit, character.character_address());
+}
+
+/// Deletes a jump permit by destroying it. Only the owner can call this (by passing their permit).
+public fun delete_jump_permit(jump_permit: JumpPermit) {
+    let JumpPermit { id, .. } = jump_permit;
+    id.delete();
+}
+
+/// Deletes a jump permit using the same extension Auth that can issue permits. The caller must have
+/// the permit (e.g. passed in by the owner, or held in extension logic).
+public fun delete_jump_permit_with_auth<Auth: drop>(
+    source_gate: &Gate,
+    jump_permit: JumpPermit,
+    _: Auth,
+) {
+    assert!(option::is_some(&source_gate.extension), EExtensionNotAuthorized);
+    let extension_type = option::borrow(&source_gate.extension);
+    assert!(extension_type == &type_name::with_defining_ids<Auth>(), EExtensionNotAuthorized);
+    let JumpPermit { id, .. } = jump_permit;
+    id.delete();
 }
 
 /// Default jump from one gate to another (no permit required).
@@ -462,6 +509,18 @@ public fun reveal_location(
 }
 
 // === View Functions ===
+public fun gate_config_id(config: &GateConfig): ID {
+    object::id(config)
+}
+
+public fun id(gate: &Gate): ID {
+    object::id(gate)
+}
+
+public fun jump_permit_id(permit: &JumpPermit): ID {
+    object::id(permit)
+}
+
 public fun status(gate: &Gate): &AssemblyStatus {
     &gate.status
 }
@@ -483,6 +542,13 @@ public fun are_gates_linked(gate_a: &Gate, gate_b: &Gate): bool {
 
 public fun linked_gate_id(gate: &Gate): Option<ID> {
     gate.linked_gate_id
+}
+
+/// Route hash for a jump permit: `blake2b256(bcs(source_id) || bcs(destination_id))`.
+/// Same encoding as `issue_jump_permit(source_gate, destination_gate, ...)` stores in `JumpPermit.route_hash`.
+/// `jump` accepts either argument order; swap the gates if you need the reversed hash.
+public fun route_hash(source_gate: &Gate, destination_gate: &Gate): vector<u8> {
+    compute_route_hash(object::id(source_gate), object::id(destination_gate))
 }
 
 public fun owner_cap_id(gate: &Gate): ID {

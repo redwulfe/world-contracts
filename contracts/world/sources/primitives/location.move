@@ -209,6 +209,9 @@ public fun verify_same_location(location_a_hash: vector<u8>, location_b_hash: ve
 }
 
 // === View Functions ===
+public fun id(registry: &LocationRegistry): ID {
+    object::id(registry)
+}
 
 public fun hash(location: &Location): vector<u8> {
     location.location_hash

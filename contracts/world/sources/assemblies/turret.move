@@ -56,6 +56,8 @@ const EMetadataNotSet: vector<u8> = b"Metadata not set on assembly";
 const EExtensionConfigFrozen: vector<u8> = b"Extension configuration is frozen";
 #[error(code = 11)]
 const EExtensionNotConfigured: vector<u8> = b"Extension must be configured before freezing";
+#[error(code = 12)]
+const ENoExtensionToRevoke: vector<u8> = b"No extension authorization to revoke";
 
 // Priority weight increments applied by default rules (effective_weight_and_excluded)
 const STARTED_ATTACK_WEIGHT_INCREMENT: u64 = 10000;
@@ -145,6 +147,13 @@ public struct ExtensionAuthorizedEvent has copy, drop {
     owner_cap_id: ID,
 }
 
+public struct ExtensionRevokedEvent has copy, drop {
+    assembly_id: ID,
+    assembly_key: TenantItemId,
+    revoked_extension: TypeName,
+    owner_cap_id: ID,
+}
+
 // === Public Functions ===
 public fun authorize_extension<Auth: drop>(turret: &mut Turret, owner_cap: &OwnerCap<Turret>) {
     let turret_id = object::id(turret);
@@ -169,6 +178,24 @@ public fun freeze_extension_config(turret: &mut Turret, owner_cap: &OwnerCap<Tur
     assert!(option::is_some(&turret.extension), EExtensionNotConfigured);
     assert!(!extension_freeze::is_extension_frozen(&turret.id), EExtensionConfigFrozen);
     extension_freeze::freeze_extension_config(&mut turret.id, turret_id);
+}
+
+/// Clears extension authorization and restores default turret behaviour.
+/// Only the `OwnerCap` holder may call; **not allowed after** `freeze_extension_config`.
+public fun revoke_extension_authorization(turret: &mut Turret, owner_cap: &OwnerCap<Turret>) {
+    let turret_id = object::id(turret);
+    assert!(access::is_authorized(owner_cap, turret_id), ETurretNotAuthorized);
+    assert!(!extension_freeze::is_extension_frozen(&turret.id), EExtensionConfigFrozen);
+    assert!(option::is_some(&turret.extension), ENoExtensionToRevoke);
+    let ext = turret.extension;
+    turret.extension = option::none();
+    let revoked_extension = option::destroy_some(ext);
+    event::emit(ExtensionRevokedEvent {
+        assembly_id: turret_id,
+        assembly_key: turret.key,
+        revoked_extension,
+        owner_cap_id: object::id(owner_cap),
+    });
 }
 
 public fun online(
@@ -391,6 +418,15 @@ public fun reveal_location(
 }
 
 // === View Functions ===
+public fun id(turret: &Turret): ID {
+    object::id(turret)
+}
+
+/// Unique key for this turret (used for dedupe and derivation).
+public fun key(turret: &Turret): TenantItemId {
+    turret.key
+}
+
 public fun status(turret: &Turret): &AssemblyStatus {
     &turret.status
 }
@@ -412,7 +448,12 @@ public fun energy_source_id(turret: &Turret): &Option<ID> {
     &turret.energy_source_id
 }
 
-/// if its authorized, return the configured extension type (if any)
+/// Configured extension type name, if any. Use extension_type() when extension is guaranteed configured.
+public fun extension(turret: &Turret): &Option<TypeName> {
+    &turret.extension
+}
+
+/// If configured, returns the extension type (aborts if no extension is configured).
 public fun extension_type(turret: &Turret): TypeName {
     *option::borrow(&turret.extension)
 }
@@ -429,6 +470,11 @@ public fun is_extension_frozen(turret: &Turret): bool {
 
 public fun type_id(turret: &Turret): u64 {
     turret.type_id
+}
+
+/// Turret metadata (name, description, url) if set.
+public fun metadata(turret: &Turret): &Option<Metadata> {
+    &turret.metadata
 }
 
 /// Returns whether the target is an aggressor.
@@ -455,6 +501,21 @@ public fun character_id(candidate: &TargetCandidate): u32 {
 
 public fun character_tribe(candidate: &TargetCandidate): u32 {
     candidate.character_tribe
+}
+
+/// Percentage of structure hit points remaining (0-100).
+public fun hp_ratio(candidate: &TargetCandidate): u64 {
+    candidate.hp_ratio
+}
+
+/// Percentage of shield hit points remaining (0-100).
+public fun shield_ratio(candidate: &TargetCandidate): u64 {
+    candidate.shield_ratio
+}
+
+/// Percentage of armor hit points remaining (0-100).
+public fun armor_ratio(candidate: &TargetCandidate): u64 {
+    candidate.armor_ratio
 }
 
 public fun priority_weight(candidate: &TargetCandidate): u64 {
@@ -778,9 +839,4 @@ fun return_list_contains_id(list: &vector<ReturnTargetPriorityList>, search_key:
 #[test_only]
 public fun destroy_online_receipt_test(receipt: OnlineReceipt) {
     let OnlineReceipt { .. } = receipt;
-}
-
-#[test_only]
-public fun metadata(turret: &Turret): &Option<Metadata> {
-    &turret.metadata
 }
